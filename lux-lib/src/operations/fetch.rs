@@ -1,6 +1,6 @@
 use bon::Builder;
-use git2::build::RepoBuilder;
-use git2::{Cred, FetchOptions, RemoteCallbacks};
+use git2::build::{RepoBuilder, CheckoutBuilder};
+use git2::CheckoutNotificationType;
 use remove_dir_all::remove_dir_all;
 use ssri::Integrity;
 use std::fs::File;
@@ -10,6 +10,7 @@ use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use thiserror::Error;
+use log::{trace, debug, info, warn};
 
 use crate::build::utils::recursive_copy_dir;
 use crate::config::Config;
@@ -25,6 +26,7 @@ use crate::progress::ProgressBar;
 use crate::rockspec::Rockspec;
 
 use super::DownloadSrcRockError;
+use super::git_auth;
 use super::UnpackError;
 
 /// A rocks package source fetcher, providing fine-grained control
@@ -70,6 +72,7 @@ where
     /// returning the source `Integrity`.
     pub(crate) async fn fetch_internal(self) -> Result<RemotePackageSourceMetadata, FetchSrcError> {
         let fetch = self._build();
+        trace!("fetch_src: start package={} version={}", fetch.rockspec.package(), fetch.rockspec.version());
         match do_fetch_src(&fetch).await {
             Err(err) => match &fetch.rockspec.source().current_platform().source_spec {
                 RockSourceSpec::Git(_) | RockSourceSpec::Url(_) => {
@@ -83,6 +86,7 @@ where
                             &package, err
                         ))
                     });
+                    warn!("fetch_src: failed to fetch; falling back to .src.rock: {}", err);
                     fetch.progress.map(|p| {
                         p.println(format!(
                             "⚠️ Falling back to searching for a .src.rock archive on {}",
@@ -185,20 +189,67 @@ async fn do_fetch_src<R: Rockspec>(
         RockSourceSpec::Git(git) => {
             let url = git.url.to_string();
             progress.map(|p| p.set_message(format!("🦠 Cloning {url}")));
-
-            let mut callbacks = RemoteCallbacks::new();
-            callbacks.credentials(|_url, username_from_url, _allowed_types| {
-                Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-            });
-            let mut fetch_options = FetchOptions::new();
+            debug!("git clone: url={}", url);
+            let start = std::time::Instant::now();
+            let mut fetch_options = git_auth::fetch_options_with_auth_for_url(&url);
             fetch_options.update_fetchhead(false);
-            fetch_options.remote_callbacks(callbacks);
             if git.checkout_ref.is_none() {
                 fetch_options.depth(1);
+                trace!("git clone: shallow=1");
             };
             let mut repo_builder = RepoBuilder::new();
             repo_builder.fetch_options(fetch_options);
+            let mut checkout = CheckoutBuilder::new();
+            checkout.progress(|path, completed, total| {
+                match path {
+                    Some(p) => trace!(
+                        "git checkout: {}/{} {}",
+                        completed,
+                        total,
+                        p.to_string_lossy()
+                    ),
+                    None => trace!("git checkout: {}/{} (no path)", completed, total),
+                }
+            });
+            // Auto-tune for WSL unless explicitly overridden
+            let is_wsl = std::env::var_os("WSL_INTEROP").is_some()
+                || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                    .map(|s| s.to_ascii_lowercase().contains("microsoft"))
+                    .unwrap_or(false);
+            if is_wsl && std::env::var_os("LUX_GIT_DISABLE_FILTERS").is_none() {
+                trace!("git checkout: auto disable_filters on WSL");
+                checkout.disable_filters(true);
+            }
+            // Optional flags via env to help diagnose hangs
+            if std::env::var_os("LUX_GIT_DISABLE_FILTERS").is_some() {
+                trace!("git checkout: disable_filters=true");
+                checkout.disable_filters(true);
+            }
+            if std::env::var_os("LUX_GIT_CHECKOUT_FORCE").is_some() {
+                trace!("git checkout: force=true");
+                checkout.force();
+            }
+            // Note: dont_write_index is not available in our git2 version
+            // Detailed notifications (can be noisy, but useful if it stalls)
+            checkout.notify_on(
+                CheckoutNotificationType::CONFLICT
+                    | CheckoutNotificationType::DIRTY
+                    | CheckoutNotificationType::UPDATED
+                    | CheckoutNotificationType::UNTRACKED
+                    | CheckoutNotificationType::IGNORED,
+            );
+            checkout.notify(|why, path, _baseline, _target, _workdir| {
+                let kind = format!("{:?}", why);
+                match path {
+                    Some(p) => trace!("git checkout notify: {} {}", kind, p.to_string_lossy()),
+                    None => trace!("git checkout notify: {} (no path)", kind),
+                }
+                true
+            });
+            repo_builder.with_checkout(checkout);
             let repo = repo_builder.clone(&url, dest_dir)?;
+            let elapsed = start.elapsed();
+            info!("git clone: done url={} in {:?}", url, elapsed);
 
             let checkout_ref = match &git.checkout_ref {
                 Some(checkout_ref) => {

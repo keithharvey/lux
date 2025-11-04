@@ -9,11 +9,11 @@ use crate::{
     build::utils,
     config::{Config, LuaVersion},
     hash::HasIntegrity,
-    operations::{self, UnpackError},
+    operations::{self, git_auth, UnpackError},
     progress::{Progress, ProgressBar},
 };
 use bon::Builder;
-use git2::{build::RepoBuilder, FetchOptions};
+use git2::build::RepoBuilder;
 use ssri::Integrity;
 use target_lexicon::Triple;
 use tempfile::tempdir;
@@ -95,7 +95,7 @@ async fn do_build_luajit(args: BuildLua<'_>) -> Result<(), BuildLuaError> {
     progress.map(|p| p.set_message(format!("🦠 Cloning {luajit_url}")));
     {
         // We create a new scope because we have to drop fetch_options before the await
-        let mut fetch_options = FetchOptions::new();
+        let mut fetch_options = git_auth::fetch_options_with_auth_for_url(luajit_url);
         fetch_options.update_fetchhead(false);
         let mut repo_builder = RepoBuilder::new();
         repo_builder.fetch_options(fetch_options);

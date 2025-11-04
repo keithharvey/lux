@@ -1,11 +1,12 @@
 use std::io;
 
-use git2::{AutotagOption, Cred, FetchOptions, RemoteCallbacks, Repository};
+use git2::{AutotagOption, Repository};
 use itertools::Itertools;
 use tempfile::tempdir;
 use thiserror::Error;
 
 use crate::git::url::RemoteGitUrl;
+use crate::operations::git_auth;
 
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -48,13 +49,8 @@ fn latest_semver_tag(url: &RemoteGitUrl) -> Result<Option<String>, GitError> {
     let mut remote = repo
         .remote_anonymous(&url_str)
         .map_err(|err| GitError::RemoteInit(url_str.clone(), err))?;
-    let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|_url, username_from_url, _allowed_types| {
-        Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-    });
-    let mut fetch_opts = FetchOptions::new();
+    let mut fetch_opts = git_auth::fetch_options_with_auth_for_url(&url_str);
     fetch_opts.download_tags(AutotagOption::All);
-    fetch_opts.remote_callbacks(callbacks);
     remote
         .fetch(&[] as &[&str], Some(&mut fetch_opts), None)
         .map_err(|err| GitError::RemoteFetch(url_str.clone(), err))?;
@@ -86,12 +82,7 @@ fn latest_commit_sha(url: &RemoteGitUrl) -> Result<Option<String>, GitError> {
     let mut remote = repo
         .remote_anonymous(&url_str)
         .map_err(|err| GitError::RemoteInit(url_str.clone(), err))?;
-    let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|_url, username_from_url, _allowed_types| {
-        Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-    });
-    let mut fetch_opts = FetchOptions::new();
-    fetch_opts.remote_callbacks(callbacks);
+    let mut fetch_opts = git_auth::fetch_options_with_auth_for_url(&url_str);
     remote
         .fetch(&[] as &[&str], Some(&mut fetch_opts), None)
         .map_err(|err| GitError::RemoteFetch(url_str.clone(), err))?;

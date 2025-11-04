@@ -15,10 +15,36 @@ use lux_lib::{
     config::{tree::RockLayoutConfig, ConfigBuilder, LuaVersion},
     lockfile::PinnedState::{Pinned, Unpinned},
 };
+use log::{trace, debug, info, warn, error};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Initialize logging once with RUST_LOG or sensible defaults
+    if std::env::var_os("RUST_LOG").is_none() {
+        let default = if cli.verbose { "lux_lib=trace,lux_cli=trace,git2=warn" } else { "info" };
+        std::env::set_var("RUST_LOG", default);
+    }
+    let _ = env_logger::Builder::from_env(env_logger::Env::default())
+        .format_timestamp_millis()
+        .try_init();
+
+    // Enable libgit2 internal tracing when verbose or when explicitly requested
+    if cli.verbose || std::env::var_os("LUX_GIT2_TRACE").is_some() {
+        let _ = git2::trace_set(git2::TraceLevel::Trace, |level, message| {
+            let msg = String::from_utf8_lossy(message);
+            match level {
+                git2::TraceLevel::Error => error!(target: "libgit2", "{}", msg),
+                git2::TraceLevel::Warn => warn!(target: "libgit2", "{}", msg),
+                git2::TraceLevel::Info => info!(target: "libgit2", "{}", msg),
+                git2::TraceLevel::Debug => debug!(target: "libgit2", "{}", msg),
+                git2::TraceLevel::Trace => trace!(target: "libgit2", "{}", msg),
+                git2::TraceLevel::Fatal => error!(target: "libgit2", "FATAL: {}", msg),
+                git2::TraceLevel::None => (),
+            }
+        });
+    }
 
     let lua_version = cli.lua_version.or({
         if cli.nvim {

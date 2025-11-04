@@ -1,0 +1,7 @@
+error: unexpected argument '-f' found
+
+  tip: to pass '-f' as a value, use '-- -f'
+
+Usage: lx install [OPTIONS] [PACKAGE_REQ]...
+
+For more information, try '--help'.

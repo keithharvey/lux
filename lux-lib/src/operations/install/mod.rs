@@ -235,16 +235,27 @@ async fn install_impl(
         all_packages.insert(dep.spec.id(), dep);
     }
 
+    let max_jobs = config.max_jobs();
+    log::debug!("install: starting parallel installation with max_jobs={}", max_jobs);
+    if max_jobs == usize::MAX {
+        log::warn!("install: unlimited parallel jobs (max_jobs=usize::MAX) may cause deadlocks");
+    }
+
     let installed_packages =
-        futures::stream::iter(all_packages.clone().into_values().map(|install_spec| {
+        futures::stream::iter(all_packages.clone().into_values().enumerate().map(|(idx, install_spec)| {
             let progress_arc = progress_arc.clone();
-            let downloaded_rock = install_spec.downloaded_rock;
+            let downloaded_rock = install_spec.downloaded_rock.clone();
             let config = config.clone();
             let tree = tree.clone();
             let lua = lua.clone();
+            let package_name = install_spec.spec.id().to_string();
+
+            log::trace!("install: queuing task {} for package {}", idx, package_name);
 
             tokio::spawn({
+                let package_name = package_name.clone();
                 async move {
+                    log::trace!("install: starting task for package {}", package_name);
                     let pkg = match downloaded_rock {
                         RemoteRockDownload::RockspecOnly { rockspec_download } => {
                             install_rockspec(
@@ -306,16 +317,23 @@ async fn install_impl(
                         }
                     };
 
+                    log::trace!("install: completed task for package {}", package_name);
                     Ok::<_, InstallError>((pkg.id(), (pkg, install_spec.entry_type)))
                 }
             })
         }))
-        .buffered(config.max_jobs())
+        .buffered(max_jobs)
         .collect::<Vec<_>>()
-        .await
+        .await;
+
+    log::debug!("install: parallel processing completed, collecting results");
+
+    let installed_packages = installed_packages
         .into_iter()
         .flatten()
         .try_collect::<_, HashMap<LocalPackageId, (LocalPackage, tree::EntryType)>, _>()?;
+
+    log::debug!("install: collected {} installed packages", installed_packages.len());
 
     let write_dependency = |lockfile: &mut Lockfile<ReadWrite>,
                             id: &LocalPackageId,

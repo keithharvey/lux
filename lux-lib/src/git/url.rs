@@ -46,7 +46,9 @@ impl FromStr for RemoteGitUrl {
             host: host.to_string(),
             repo: provider.repo().to_string(),
             owner: provider.owner().to_string(),
-            url_str: url.to_string(),
+            // Preserve the original input string to avoid unintended
+            // canonicalization (e.g. forcing SSH for github remotes).
+            url_str: s.to_string(),
         })
     }
 }
