@@ -427,6 +427,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regression_sync_is_idempotent_after_install_tree_loss() {
+        // When `lux.lock` exists but `.lux/` does not, `package_sync_spec`
+        // reports every package as `to_add` (because each install dir is
+        // missing) and `do_sync` calls `Install::install` twice -- once for
+        // the local `to_add` and again for `package_sync_spec.to_add`. The
+        // second Install pushes onto an install-tree lockfile that already
+        // mirrors the project state, and without dedup on `add_entrypoint` /
+        // `add_dependency` the lockfile grows duplicate edges on every such
+        // cycle. Setup flows that intentionally nuke `.lux/` (e.g. cache
+        // rebuilds) trip this on every run.
+        if std::env::var("LUX_SKIP_IMPURE_TESTS").unwrap_or("0".into()) == "1" {
+            println!("Skipping impure test");
+            return;
+        }
+        let temp_dir = TempDir::new().unwrap().into_persistent();
+        // Inline fixture: a single test_dependency with a transitive graph
+        // (busted depends on say, luassert, etc.) so the duplication bug
+        // touches both `entrypoints` and per-rock `dependencies` arrays.
+        std::fs::write(
+            temp_dir.path().join("lux.toml"),
+            r#"
+package = "sync-idempotency-regression"
+version = "0.1.0"
+lua = ">=5.1"
+
+[test_dependencies]
+busted = "2.2.0"
+"#,
+        )
+        .unwrap();
+        let project = Project::from_exact(temp_dir.path()).unwrap().unwrap();
+        let config = ConfigBuilder::new().unwrap().build().unwrap();
+
+        Sync::new(&project, &config)
+            .sync_test_dependencies()
+            .await
+            .unwrap();
+        let lockfile_after_first_sync =
+            std::fs::read_to_string(project.lockfile_path()).unwrap();
+
+        // Simulate cache-rebuild flows that drop the install tree.
+        let tree = project.test_tree(&config).unwrap();
+        std::fs::remove_dir_all(tree.root()).unwrap();
+
+        Sync::new(&project, &config)
+            .sync_test_dependencies()
+            .await
+            .unwrap();
+        let lockfile_after_second_sync =
+            std::fs::read_to_string(project.lockfile_path()).unwrap();
+
+        assert_eq!(
+            lockfile_after_first_sync, lockfile_after_second_sync,
+            "lux.lock changed after a second sync that lost the install tree; \
+             entrypoints and dependency edges should not accumulate duplicates"
+        );
+    }
+
+    #[tokio::test]
     async fn test_sync_remove_rocks() {
         if std::env::var("LUX_SKIP_IMPURE_TESTS").unwrap_or("0".into()) == "1" {
             println!("Skipping impure test");

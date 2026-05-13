@@ -1153,7 +1153,10 @@ impl ProjectLockfile<ReadOnly> {
 impl Lockfile<ReadWrite> {
     pub(crate) fn add_entrypoint(&mut self, rock: &LocalPackage) {
         self.add(rock);
-        self.lock.entrypoints.push(rock.id().clone())
+        let id = rock.id();
+        if !self.lock.entrypoints.contains(&id) {
+            self.lock.entrypoints.push(id);
+        }
     }
 
     pub(crate) fn remove_entrypoint(&mut self, rock: &LocalPackage) {
@@ -1177,11 +1180,21 @@ impl Lockfile<ReadWrite> {
     }
 
     /// Add a dependency for a package.
+    ///
+    /// `dependencies` is a set: re-adding an edge that already exists is a
+    /// no-op. Without this dedup, callers that re-invoke add_dependency for
+    /// edges already in the lockfile (e.g. `lx sync` when the install tree
+    /// has been cleared) accrete duplicates inside the `dependencies` array.
     pub(crate) fn add_dependency(&mut self, target: &LocalPackage, dependency: &LocalPackage) {
         self.lock
             .rocks
             .entry(target.id())
-            .and_modify(|rock| rock.spec.dependencies.push(dependency.id()))
+            .and_modify(|rock| {
+                let dep_id = dependency.id();
+                if !rock.spec.dependencies.contains(&dep_id) {
+                    rock.spec.dependencies.push(dep_id);
+                }
+            })
             .or_insert_with(|| {
                 let mut target = target.clone();
                 target.spec.dependencies.push(dependency.id());
